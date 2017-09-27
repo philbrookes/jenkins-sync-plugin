@@ -9,6 +9,7 @@ import hudson.remoting.Base64;
 import hudson.security.ACL;
 import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.openshift.api.model.BuildConfig;
+import io.fabric8.openshift.api.model.SecretBuildSource;
 import jenkins.model.Jenkins;
 import org.acegisecurity.context.SecurityContext;
 import org.acegisecurity.context.SecurityContextHolder;
@@ -20,6 +21,8 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.ArrayList;
+import java.util.List;
 
 import static hudson.Util.fixNull;
 import static io.fabric8.jenkins.openshiftsync.Constants.*;
@@ -50,6 +53,7 @@ public class CredentialsUtils {
                 id = secretName(buildConfig.getMetadata().getNamespace(),
                         buildConfig.getSpec().getSource().getSourceSecret()
                                 .getName());
+
                 Credentials existingCreds = lookupCredentials(id);
                 final SecurityContext previousContext = ACL
                         .impersonate(ACL.SYSTEM);
@@ -69,6 +73,48 @@ public class CredentialsUtils {
             }
         }
         return id;
+    }
+
+    public static synchronized List<String> updateSecretData(BuildConfig buildConfig) throws IOException {
+      List<String> ids = new ArrayList<>();
+      if (buildConfig.getSpec() != null
+        && buildConfig.getSpec().getSource() != null
+        && buildConfig.getSpec().getSource().getSecrets() != null
+        && buildConfig.getSpec().getSource().getSecrets().size() > 0) {
+          
+        for(int i=0; i < buildConfig.getSpec().getSource().getSecrets().size(); i++) {
+          SecretBuildSource secret = buildConfig.getSpec().getSource().getSecrets().get(i);
+          Secret dataSecret = getAuthenticatedOpenShiftClient()
+            .secrets()
+            .inNamespace(buildConfig.getMetadata().getNamespace())
+            .withName(secret.getSecret().getName()).get();
+
+          logger.warning(String.format("found secret named: %s", secret.getSecret().getName()));
+
+          if (dataSecret != null) {
+            Map<String, String> data = secretToData(dataSecret);
+            String id = secretName(buildConfig.getMetadata().getNamespace(), secret.getSecret().getName());
+
+            logger.warning(data.toString());
+            logger.warning(String.format("created secret id: %s", id));
+            ids.add(id);
+
+            Credentials existingCreds = lookupCredentials(id);
+            final SecurityContext previousContext = ACL.impersonate(ACL.SYSTEM);
+            try {
+              CredentialsStore s = CredentialsProvider.lookupStores(Jenkins.getActiveInstance()).iterator().next();
+              if (existingCreds != null) {
+                s.updateCredentials(Domain.global(), existingCreds, creds);
+              } else {
+                s.addCredentials(Domain.global(), creds);
+              }
+            } finally {
+              SecurityContextHolder.setContext(previousContext);
+            }
+          }
+        }
+      }
+      return ids;
     }
 
     // getCurrentToken returns the ServiceAccount token currently selected by
@@ -106,6 +152,13 @@ public class CredentialsUtils {
         return namespace + "-" + name;
     }
 
+    private static Map<String, String> secretToData(Secret secret) {
+      final Map<String, String> data = secret.getData();
+      
+      
+      return data;
+    }
+    
     private static Credentials secretToCredentials(Secret secret) {
         String namespace = secret.getMetadata().getNamespace();
         String name = secret.getMetadata().getName();
@@ -143,7 +196,7 @@ public class CredentialsUtils {
                     data.get(OPENSHIFT_SECRETS_DATA_SSHPRIVATEKEY));
         default:
             logger.log(Level.WARNING,
-                    "Unknown secret type: " + secret.getType());
+                    String.format("Unknown secret type: %s", secret.getType()));
             return null;
         }
     }
